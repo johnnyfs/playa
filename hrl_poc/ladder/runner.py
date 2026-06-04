@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to ladder YAML config.")
     parser.add_argument("--reports-dir", default="reports")
     parser.add_argument("--competence-dir", default="competence")
-    parser.add_argument("--trainer", choices=["heuristic", "heuristic_go", "random"], default="heuristic")
+    parser.add_argument("--trainer", choices=["heuristic", "heuristic_go", "ppo", "ppo_go", "random"], default="heuristic")
     parser.add_argument("--continue-on-failure", action="store_true")
     parser.add_argument("--seed-base", type=int, default=100_000)
     parser.add_argument("--max-eval-seeds", type=int, default=0, help="Optional cap for smoke runs.")

@@ -151,7 +151,24 @@ def test_failure_report_is_written_when_pass_rate_below_threshold(tmp_path: Path
     assert payload["aggregate"]["failures"] > 0
 
 
-def _write_tiny_ladder(tmp_path: Path, max_steps: int, pass_rate: float) -> Path:
+def test_ladder_runner_can_use_ppo_trainer_for_tiny_level(tmp_path: Path):
+    config_path = _write_tiny_ladder(tmp_path, max_steps=5, pass_rate=0.0, train_steps=4)
+
+    run_dir = run_ladder(
+        config_path,
+        reports_dir=tmp_path / "reports",
+        competence_dir=tmp_path / "competence",
+        trainer_name="ppo",
+        max_eval_seeds=1,
+    )
+
+    checkpoints = list((run_dir / "checkpoints").glob("*.pt"))
+    results = json.loads((run_dir / "level_results.json").read_text())
+    assert checkpoints
+    assert results[0]["checkpoint"]["trainer"] == "ppo_go"
+
+
+def _write_tiny_ladder(tmp_path: Path, max_steps: int, pass_rate: float, train_steps: int = 1) -> Path:
     config_path = tmp_path / "tiny_go.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -163,7 +180,7 @@ def _write_tiny_ladder(tmp_path: Path, max_steps: int, pass_rate: float) -> Path
                         "description": "tiny go",
                         "world": {"terrain": "Empty"},
                         "task": {"target_distance_px": 16, "max_steps": max_steps},
-                        "train": {"seeds": 1, "steps": 1},
+                        "train": {"seeds": 1, "steps": train_steps},
                         "eval": {"heldout_seeds": 2, "pass_rate": pass_rate},
                     }
                 ],

@@ -148,6 +148,14 @@ competence/go.json
 
 The runner currently provides `HeuristicGoTrainer` and `RandomPolicyTrainer` implementations behind a small trainer interface. The heuristic trainer is a sanity check that proves the ladder plumbing works; PPO can replace it later without changing ladder configs, report formats, or competence frontier semantics.
 
+An opt-in PPO trainer is also available:
+
+```bash
+uv run ladder --config ladders/go.yaml --trainer ppo
+```
+
+This trains a real `SkillPolicy` checkpoint for each level using that level's generated curriculum episodes and `train.steps`, then evaluates the saved checkpoint on held-out seeds. The default remains the heuristic trainer because it is the fastest way to smoke-test curriculum generation and reporting.
+
 ## Execution Logs
 
 Every evaluated episode writes a JSONL record:
