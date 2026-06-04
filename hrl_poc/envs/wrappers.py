@@ -151,6 +151,8 @@ def encode_skill_params(skill_call: SkillCall, env: GridWorldEnv) -> np.ndarray:
         params[0] = target.x / scale
         params[1] = target.y / scale
         params[2] = 1.0 if name == "go_evading" else 0.0
+        params[3] = (target.x - int(env.player[0])) / scale
+        params[4] = (target.y - int(env.player[1])) / scale
     elif name in {"attack", "collect"}:
         entity_id = str(skill_call.params["enemy_id"] if name == "attack" else skill_call.params["item_id"])
         entity = env.world_state().entities.get(entity_id)

@@ -68,7 +68,12 @@ class LevelEvalResult:
 class SkillTrainer(Protocol):
     name: str
 
-    def train_level(self, level: LadderLevel, checkpoint_dir: Path) -> Checkpoint:
+    def train_level(
+        self,
+        level: LadderLevel,
+        checkpoint_dir: Path,
+        initial_checkpoint: Checkpoint | None = None,
+    ) -> Checkpoint:
         ...
 
     def evaluate_level(
@@ -84,7 +89,12 @@ class SkillTrainer(Protocol):
 class BaseGoTrainer:
     name = "base"
 
-    def train_level(self, level: LadderLevel, checkpoint_dir: Path) -> Checkpoint:
+    def train_level(
+        self,
+        level: LadderLevel,
+        checkpoint_dir: Path,
+        initial_checkpoint: Checkpoint | None = None,
+    ) -> Checkpoint:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         path = checkpoint_dir / f"{level.id}_{self.name}.json"
         payload = {
@@ -92,6 +102,7 @@ class BaseGoTrainer:
             "level_id": level.id,
             "skill": "go",
             "train": level.train.to_dict(),
+            "initialized_from": str(initial_checkpoint.path) if initial_checkpoint else None,
             "note": "Placeholder checkpoint. Replace this trainer with PPO behind the SkillTrainer interface.",
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -167,7 +178,9 @@ class PpoGoTrainer(BaseGoTrainer):
         clip_epsilon: float = 0.2,
         value_coef: float = 0.5,
         entropy_coef: float = 0.02,
+        go_aux_coef: float = 4.0,
         max_grad_norm: float = 0.5,
+        seed: int = 7,
     ):
         self.batch_episodes = batch_episodes
         self.lr = lr
@@ -176,18 +189,30 @@ class PpoGoTrainer(BaseGoTrainer):
         self.clip_epsilon = clip_epsilon
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
+        self.go_aux_coef = go_aux_coef
         self.max_grad_norm = max_grad_norm
+        self.seed = seed
 
-    def train_level(self, level: LadderLevel, checkpoint_dir: Path) -> Checkpoint:
+    def train_level(
+        self,
+        level: LadderLevel,
+        checkpoint_dir: Path,
+        initial_checkpoint: Checkpoint | None = None,
+    ) -> Checkpoint:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        torch.manual_seed(self.seed + int(level.world.seed))
+        np.random.seed(self.seed + int(level.world.seed))
         env_size = level.world.env_size
         action_space = generate_go_task(level.world, level.task, seed=0)[0].env().action_space
         policy = SkillPolicy(action_space, num_skills=len(SKILL_REGISTRY), grid_size=env_size)
+        initialization = self._initialize_policy(policy, initial_checkpoint, expected_grid_size=env_size)
         optimizer = torch.optim.Adam(policy.parameters(), lr=self.lr)
         steps_budget = int(level.train.steps)
         train_seed_count = max(1, int(level.train.seeds))
         steps_done = 0
         episode_idx = 0
+        update_idx = 0
+        rollout_history = []
 
         while steps_done < steps_budget:
             rollout = self._collect_rollout(policy, level, seed_base=episode_idx % train_seed_count)
@@ -196,6 +221,17 @@ class PpoGoTrainer(BaseGoTrainer):
             self._update_ppo(policy, optimizer, rollout)
             steps_done += int(rollout["step_count"])
             episode_idx += int(rollout["episode_count"])
+            update_idx += 1
+            rollout_history.append(_rollout_metrics(update_idx, steps_done, episode_idx, rollout))
+
+        final_train_metrics = rollout_history[-1] if rollout_history else {
+            "update": 0,
+            "steps_done": 0,
+            "episodes_done": 0,
+            "success_rate": 0.0,
+            "avg_episode_length": 0.0,
+            "avg_reward": 0.0,
+        }
 
         path = checkpoint_dir / f"{level.id}_{self.name}.pt"
         payload = {
@@ -205,8 +241,14 @@ class PpoGoTrainer(BaseGoTrainer):
             "level_id": level.id,
             "steps_done": steps_done,
             "episodes_done": episode_idx,
+            "updates_done": update_idx,
             "train": level.train.to_dict(),
             "policy_config": {"grid_size": env_size, "condition_on_skill": True},
+            "initialization": initialization,
+            "train_metrics": {
+                "final": final_train_metrics,
+                "history": rollout_history,
+            },
             "trainer_config": {
                 "batch_episodes": self.batch_episodes,
                 "lr": self.lr,
@@ -215,7 +257,9 @@ class PpoGoTrainer(BaseGoTrainer):
                 "clip_epsilon": self.clip_epsilon,
                 "value_coef": self.value_coef,
                 "entropy_coef": self.entropy_coef,
+                "go_aux_coef": self.go_aux_coef,
                 "max_grad_norm": self.max_grad_norm,
+                "seed": self.seed,
             },
         }
         torch.save(payload, path)
@@ -227,7 +271,10 @@ class PpoGoTrainer(BaseGoTrainer):
                 "skill": "go",
                 "steps_done": steps_done,
                 "episodes_done": episode_idx,
+                "updates_done": update_idx,
                 "policy_config": payload["policy_config"],
+                "initialization": initialization,
+                "train_metrics": payload["train_metrics"],
             },
         )
 
@@ -393,6 +440,10 @@ class PpoGoTrainer(BaseGoTrainer):
                 value_loss = nn.functional.mse_loss(predicted_values, batch_returns)
                 entropy_loss = -entropy.mean()
                 loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
+                if self.go_aux_coef > 0:
+                    target_actions = _go_oracle_actions(batch_obs)
+                    aux_loss = nn.functional.cross_entropy(logits, target_actions)
+                    loss = loss + self.go_aux_coef * aux_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -412,6 +463,37 @@ class PpoGoTrainer(BaseGoTrainer):
         policy.load_state_dict(checkpoint["policy_state_dict"])
         policy.eval()
         return policy
+
+    def _initialize_policy(
+        self,
+        policy: SkillPolicy,
+        initial_checkpoint: Checkpoint | None,
+        expected_grid_size: int,
+    ) -> dict[str, Any]:
+        if initial_checkpoint is None:
+            return {"status": "cold_start", "checkpoint": None}
+        if initial_checkpoint.trainer != self.name or initial_checkpoint.path.suffix != ".pt":
+            return {
+                "status": "skipped",
+                "reason": "incompatible_trainer",
+                "checkpoint": str(initial_checkpoint.path),
+            }
+        checkpoint = torch.load(initial_checkpoint.path, map_location="cpu")
+        checkpoint_grid_size = int(checkpoint.get("policy_config", {}).get("grid_size", -1))
+        if checkpoint_grid_size != expected_grid_size:
+            return {
+                "status": "skipped",
+                "reason": "incompatible_grid_size",
+                "checkpoint": str(initial_checkpoint.path),
+                "checkpoint_grid_size": checkpoint_grid_size,
+                "expected_grid_size": expected_grid_size,
+            }
+        policy.load_state_dict(checkpoint["policy_state_dict"])
+        return {
+            "status": "loaded",
+            "checkpoint": str(initial_checkpoint.path),
+            "source_level_id": initial_checkpoint.level_id,
+        }
 
 
 class RandomPolicy:
@@ -514,11 +596,14 @@ def _greedy_action(terrain: np.ndarray, player: tuple[int, int], goal: tuple[int
 
 def _augment_obs(raw_obs: dict[str, Any], skill_call: SkillCall) -> dict[str, Any]:
     terrain = np.asarray(raw_obs["terrain"])
+    player = np.asarray(raw_obs["player"], dtype=np.float32)
     target = _target(skill_call)
     scale = max(1, terrain.shape[0] - 1)
     skill_params = np.zeros(5, dtype=np.float32)
     skill_params[0] = target.x / scale
     skill_params[1] = target.y / scale
+    skill_params[3] = (target.x - player[0]) / scale
+    skill_params[4] = (target.y - player[1]) / scale
     return {
         "state": raw_obs,
         "skill_id": np.array([get_skill_id("go")], dtype=np.int64),
@@ -532,3 +617,29 @@ def _distance_px(player: tuple[int, int], target: Vec2, world: Any) -> int:
 
 def _bounded(value: float) -> float:
     return float(max(-1.0, min(1.0, value)))
+
+
+def _rollout_metrics(update_idx: int, steps_done: int, episodes_done: int, rollout: dict[str, Any]) -> dict[str, Any]:
+    successes = [bool(value) for value in rollout.get("successes", [])]
+    lengths = [int(value) for value in rollout.get("lengths", [])]
+    rewards = [float(value) for value in rollout.get("episode_rewards", [])]
+    return {
+        "update": int(update_idx),
+        "steps_done": int(steps_done),
+        "episodes_done": int(episodes_done),
+        "success_rate": float(np.mean(successes)) if successes else 0.0,
+        "avg_episode_length": float(np.mean(lengths)) if lengths else 0.0,
+        "avg_reward": float(np.mean(rewards)) if rewards else 0.0,
+    }
+
+
+def _go_oracle_actions(obs_batch: list[dict[str, Any]]) -> torch.Tensor:
+    targets = []
+    for obs in obs_batch:
+        state = obs["state"]
+        terrain = np.asarray(state["terrain"])
+        player = tuple(int(v) for v in np.asarray(state["player"]).reshape(-1)[:2])
+        params = np.asarray(obs["skill_params"], dtype=np.float32)
+        goal = np.rint(params[:2] * (terrain.shape[0] - 1)).astype(np.int64)
+        targets.append(shortest_path_action(terrain, player, (int(goal[0]), int(goal[1]))))
+    return torch.as_tensor(targets, dtype=torch.long)

@@ -20,10 +20,14 @@ def run_ladder(
     continue_on_failure: bool = False,
     seed_base: int = 100_000,
     max_eval_seeds: int | None = None,
+    only_level: str | None = None,
 ) -> Path:
     config = load_ladder_config(config_path)
     if config.skill != "go":
         raise ValueError("The current ladder harness only fully wires the go(target) skill")
+    levels = tuple(level for level in config.levels if only_level is None or level.id == only_level)
+    if only_level is not None and not levels:
+        raise ValueError(f"Unknown ladder level {only_level!r}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(reports_dir) / config.skill / f"run_{timestamp}"
@@ -39,12 +43,12 @@ def run_ladder(
     trainer = make_trainer(trainer_name)
     level_results: list[LevelEvalResult] = []
     frontier = _initial_frontier(config)
-    latest_passed_level = None
+    latest_passed_checkpoint = None
 
-    for level_idx, level in enumerate(config.levels):
+    for level_idx, level in enumerate(levels):
         active_level = _with_max_eval_seeds(level, max_eval_seeds)
         frontier["levels"][active_level.id]["status"] = "training"
-        checkpoint = trainer.train_level(active_level, checkpoint_dir)
+        checkpoint = trainer.train_level(active_level, checkpoint_dir, initial_checkpoint=latest_passed_checkpoint)
         result = trainer.evaluate_level(
             checkpoint=checkpoint,
             level=active_level,
@@ -56,10 +60,14 @@ def run_ladder(
             "status": "passed" if result.passed else "failed",
             "pass_rate": result.pass_rate,
             "required_pass_rate": result.required_pass_rate,
+            "trainer": checkpoint.trainer,
+            "checkpoint": str(checkpoint.path),
+            "initialization": checkpoint.metadata.get("initialization"),
+            "train_metrics": checkpoint.metadata.get("train_metrics", {}).get("final"),
         }
         if result.passed:
-            latest_passed_level = active_level.id
-            frontier["latest_passed_level"] = latest_passed_level
+            latest_passed_checkpoint = checkpoint
+            frontier["latest_passed_level"] = active_level.id
         else:
             _write_failure_report(failure_dir, result)
             if not continue_on_failure:
@@ -80,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--continue-on-failure", action="store_true")
     parser.add_argument("--seed-base", type=int, default=100_000)
     parser.add_argument("--max-eval-seeds", type=int, default=0, help="Optional cap for smoke runs.")
+    parser.add_argument("--only-level", default="", help="Run only one level id for focused tuning.")
     return parser.parse_args()
 
 
@@ -93,6 +102,7 @@ def main() -> None:
         continue_on_failure=args.continue_on_failure,
         seed_base=args.seed_base,
         max_eval_seeds=args.max_eval_seeds or None,
+        only_level=args.only_level or None,
     )
     print(json.dumps({"run_dir": str(run_dir)}))
 
@@ -151,12 +161,19 @@ def _write_summary(run_dir: Path, config: LadderConfig, results: list[LevelEvalR
     lines = [
         f"# Competence Ladder Run: {config.skill}",
         "",
-        "| Level | Pass Rate | Required | Status |",
-        "| --- | ---: | ---: | --- |",
+        "| Level | Trainer | Pass Rate | Required | Status | Train Steps | Init |",
+        "| --- | --- | ---: | ---: | --- | ---: | --- |",
     ]
     for result in results:
         status = "passed" if result.passed else "failed"
-        lines.append(f"| {result.level_id} | {result.pass_rate:.3f} | {result.required_pass_rate:.3f} | {status} |")
+        metadata = result.checkpoint.metadata
+        initialization = metadata.get("initialization") or {}
+        init_status = str(initialization.get("status", "n/a"))
+        steps_done = int(metadata.get("steps_done", 0))
+        lines.append(
+            f"| {result.level_id} | {result.checkpoint.trainer} | {result.pass_rate:.3f} | "
+            f"{result.required_pass_rate:.3f} | {status} | {steps_done} | {init_status} |"
+        )
     if not results:
         lines.append("| none | 0.000 | 0.000 | untried |")
     lines.extend(

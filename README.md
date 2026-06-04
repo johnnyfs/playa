@@ -154,7 +154,15 @@ An opt-in PPO trainer is also available:
 uv run ladder --config ladders/go.yaml --trainer ppo
 ```
 
-This trains a real `SkillPolicy` checkpoint for each level using that level's generated curriculum episodes and `train.steps`, then evaluates the saved checkpoint on held-out seeds. The default remains the heuristic trainer because it is the fastest way to smoke-test curriculum generation and reporting.
+This trains a real `SkillPolicy` checkpoint for each level using that level's generated curriculum episodes and `train.steps`, then evaluates the saved checkpoint on held-out seeds. `go(target)` conditioning includes both absolute target coordinates and relative target offset. PPO also uses a small shortest-path auxiliary action loss for `go`, which makes the first ladder level learn reliably in this compact environment. When a level passes, the next compatible PPO level initializes from the latest passed checkpoint; incompatible model shapes are recorded as skipped initialization in the checkpoint metadata. The default remains the heuristic trainer because it is the fastest way to smoke-test curriculum generation and reporting.
+
+For focused PPO iteration on one level:
+
+```bash
+uv run ladder --config ladders/go.yaml --trainer ppo --only-level go_l0_one_step_empty --max-eval-seeds 4
+```
+
+PPO checkpoints include compact training metrics (`steps_done`, `episodes_done`, update count, train success rate, average reward, and average episode length). These are copied into `level_results.json`, `summary.md`, and `competence/go.json`.
 
 ## Execution Logs
 

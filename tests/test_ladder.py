@@ -168,6 +168,37 @@ def test_ladder_runner_can_use_ppo_trainer_for_tiny_level(tmp_path: Path):
     assert results[0]["checkpoint"]["trainer"] == "ppo_go"
 
 
+def test_ppo_trainer_initializes_next_level_from_previous_checkpoint(tmp_path: Path):
+    config_path = _write_two_level_tiny_ladder(tmp_path)
+
+    run_dir = run_ladder(
+        config_path,
+        reports_dir=tmp_path / "reports",
+        competence_dir=tmp_path / "competence",
+        trainer_name="ppo",
+        max_eval_seeds=1,
+    )
+
+    results = json.loads((run_dir / "level_results.json").read_text())
+    second_init = results[1]["checkpoint"]["metadata"]["initialization"]
+    assert second_init["status"] == "loaded"
+    assert second_init["source_level_id"] == "tiny_go_l0"
+
+
+def test_ladder_runner_only_level_runs_selected_level(tmp_path: Path):
+    config_path = _write_two_level_tiny_ladder(tmp_path)
+
+    run_dir = run_ladder(
+        config_path,
+        reports_dir=tmp_path / "reports",
+        competence_dir=tmp_path / "competence",
+        only_level="tiny_go_l1",
+    )
+
+    results = json.loads((run_dir / "level_results.json").read_text())
+    assert [result["level_id"] for result in results] == ["tiny_go_l1"]
+
+
 def _write_tiny_ladder(tmp_path: Path, max_steps: int, pass_rate: float, train_steps: int = 1) -> Path:
     config_path = tmp_path / "tiny_go.yaml"
     config_path.write_text(
@@ -183,6 +214,37 @@ def _write_tiny_ladder(tmp_path: Path, max_steps: int, pass_rate: float, train_s
                         "train": {"seeds": 1, "steps": train_steps},
                         "eval": {"heldout_seeds": 2, "pass_rate": pass_rate},
                     }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_two_level_tiny_ladder(tmp_path: Path) -> Path:
+    config_path = tmp_path / "two_level_tiny_go.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "skill": "go",
+                "levels": [
+                    {
+                        "id": "tiny_go_l0",
+                        "description": "tiny go l0",
+                        "world": {"terrain": "Empty"},
+                        "task": {"target_distance_px": 16, "max_steps": 5},
+                        "train": {"seeds": 1, "steps": 4},
+                        "eval": {"heldout_seeds": 1, "pass_rate": 0.0},
+                    },
+                    {
+                        "id": "tiny_go_l1",
+                        "description": "tiny go l1",
+                        "world": {"terrain": "Empty"},
+                        "task": {"target_distance_px": 16, "max_steps": 5},
+                        "train": {"seeds": 1, "steps": 4},
+                        "eval": {"heldout_seeds": 1, "pass_rate": 0.0},
+                    },
                 ],
             }
         ),
