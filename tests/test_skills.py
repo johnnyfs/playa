@@ -1,43 +1,62 @@
 from hrl_poc.envs.gridworld import Action, GridWorldEnv
 from hrl_poc.envs.wrappers import SkillConditionedEnv
-from hrl_poc.skills.predicates import PredicateContext, target_enemy_dead
+from hrl_poc.semantic.state import EntityState, Vec2, WorldState
+from hrl_poc.skills.evaluator import SkillEvaluator
+from hrl_poc.skills.predicates import Alive, Dead, EnemyContact, Near, Timeout
+from hrl_poc.skills.refs import EntityByIdRef, ParamRef, PlayerRef
 from hrl_poc.skills.registry import get_skill_spec
-from hrl_poc.skills.schema import EnemyType, SkillCall, SkillSpec, Vec2
+from hrl_poc.skills.schema import SkillCall
 
 
-def test_skill_spec_and_call_serialization_round_trip():
-    spec = get_skill_spec("fight")
-    spec_round_trip = SkillSpec.from_dict(spec.to_dict())
-    assert spec_round_trip == spec
+def test_semantic_predicates_resolve_refs():
+    state = WorldState(
+        tick=0,
+        global_position=Vec2(1, 1),
+        local_position=Vec2(1, 1),
+        region_id="gridworld",
+        player_id="player",
+        entities={
+            "player": EntityState("player", "player", "player", Vec2(1, 1), hp=5),
+            "enemy_0": EntityState("enemy_0", "grunt", "enemy", Vec2(2, 1), alive=False, hp=0, hostile=True),
+        },
+        tiles={},
+        inventory={},
+        attrs={"skill_steps": 1},
+    )
+    call = SkillCall("attack", {"enemy_id": "enemy_0"})
+    spec = get_skill_spec("attack")
+    ctx = __import__("hrl_poc.skills.refs", fromlist=["EvalContext"]).EvalContext(state, state, call, spec.max_steps)
 
-    call = SkillCall("fight", {"enemy_type": EnemyType.GRUNT, "target": Vec2(2, 1)})
-    call_round_trip = SkillCall.from_dict(call.to_dict())
-    assert call_round_trip == call
-
-
-def test_fight_predicate_succeeds_when_target_enemy_dead():
-    call = SkillCall("fight", {"enemy_type": EnemyType.GRUNT, "target": Vec2(2, 1)})
-    initial_state = {
-        "player": (1, 1),
-        "health": 5,
-        "enemies": [{"type": EnemyType.GRUNT, "pos": (2, 1), "hp": 1, "alive": True}],
-        "items": [],
-    }
-    final_state = {
-        "player": (1, 1),
-        "health": 5,
-        "enemies": [{"type": EnemyType.GRUNT, "pos": (2, 1), "hp": 0, "alive": False}],
-        "items": [],
-    }
-    ctx = PredicateContext(call, initial_state, initial_state, final_state, elapsed_steps=1, max_steps=10)
-
-    assert target_enemy_dead(ctx)
+    assert Near(PlayerRef(), Vec2(1, 1)).evaluate(state, ctx)
+    assert Alive(PlayerRef()).evaluate(state, ctx)
+    assert Dead(EntityByIdRef(ParamRef("enemy_id"))).evaluate(state, ctx)
+    assert not Timeout().evaluate(state, ctx)
 
 
-def test_skill_wrapper_terminates_on_navigate_success_and_rewards_it():
+def test_gridworld_exposes_world_state_in_info():
+    env = GridWorldEnv()
+    _obs, info = env.reset(
+        seed=1,
+        options={
+            "player": (0, 0),
+            "walls": [],
+            "enemies": [{"id": "enemy_0", "type": 0, "pos": (2, 1), "hp": 1}],
+            "items": [{"id": "item_0", "type": 0, "pos": (1, 0)}],
+            "health": 5,
+        },
+    )
+
+    world = info["world_state"]
+    assert world.player_id == "player"
+    assert world.entities["enemy_0"].hostile
+    assert world.entities["item_0"].kind == "item"
+    assert world.tiles[(0, 0)].walkable
+
+
+def test_skill_evaluator_go_success():
     env = SkillConditionedEnv(GridWorldEnv())
-    call = SkillCall("navigate", {"goal": Vec2(1, 0)})
-    obs, _info = env.reset(
+    call = SkillCall("go", {"target": Vec2(1, 0)})
+    _obs, _info = env.reset(
         seed=1,
         options={
             "skill_call": call,
@@ -51,45 +70,17 @@ def test_skill_wrapper_terminates_on_navigate_success_and_rewards_it():
         },
     )
 
-    assert obs["skill_id"].tolist() == [0]
-    assert obs["skill_params"][0] > 0
-
-    _obs, reward, terminated, truncated, info = env.step(Action.RIGHT)
-
-    assert terminated
-    assert not truncated
-    assert reward > 0.9
-    assert info["success"]
-    assert info["failure_reason"] is None
-
-
-def test_skill_wrapper_assigns_negative_reward_when_moving_away():
-    env = SkillConditionedEnv(GridWorldEnv())
-    call = SkillCall("navigate", {"goal": Vec2(0, 0)})
-    env.reset(
-        seed=1,
-        options={
-            "skill_call": call,
-            "env_options": {
-                "player": (1, 0),
-                "walls": [],
-                "enemies": [],
-                "items": [],
-                "health": 5,
-            },
-        },
-    )
-
     _obs, reward, terminated, _truncated, info = env.step(Action.RIGHT)
 
-    assert not terminated
-    assert reward < -0.05
-    assert not info["success"]
+    assert terminated
+    assert reward == 1.0
+    assert info["success"]
+    assert not info["failure"]
 
 
-def test_skill_wrapper_fight_success_record():
+def test_skill_evaluator_attack_success():
     env = SkillConditionedEnv(GridWorldEnv())
-    call = SkillCall("fight", {"enemy_type": EnemyType.GRUNT, "target": Vec2(2, 1)})
+    call = SkillCall("attack", {"enemy_id": "enemy_0"})
     env.reset(
         seed=1,
         options={
@@ -97,18 +88,119 @@ def test_skill_wrapper_fight_success_record():
             "env_options": {
                 "player": (1, 1),
                 "walls": [],
-                "enemies": [{"type": EnemyType.GRUNT, "pos": (2, 1), "hp": 1}],
+                "enemies": [{"id": "enemy_0", "type": 0, "pos": (2, 1), "hp": 1}],
                 "items": [],
                 "health": 5,
             },
         },
     )
 
-    _obs, _reward, terminated, _truncated, info = env.step(Action.ATTACK)
+    _obs, reward, terminated, _truncated, info = env.step(Action.ATTACK)
     record = env.make_execution_record("trajectory.json")
 
     assert terminated
+    assert reward == 1.0
     assert info["success"]
     assert record["success"]
     assert record["skill_call"] == call.to_dict()
-    assert record["trajectory_path"] == "trajectory.json"
+
+
+def test_skill_evaluator_evading_fails_on_contact():
+    prev = WorldState(
+        tick=0,
+        global_position=Vec2(0, 0),
+        local_position=Vec2(0, 0),
+        region_id="gridworld",
+        player_id="player",
+        entities={
+            "player": EntityState("player", "player", "player", Vec2(0, 0), hp=5),
+            "enemy_0": EntityState("enemy_0", "grunt", "enemy", Vec2(4, 4), hp=1, hostile=True),
+        },
+        tiles={},
+        inventory={},
+    )
+    nxt = WorldState(
+        tick=1,
+        global_position=Vec2(0, 0),
+        local_position=Vec2(0, 0),
+        region_id="gridworld",
+        player_id="player",
+        entities={
+            "player": EntityState("player", "player", "player", Vec2(0, 0), hp=5),
+            "enemy_0": EntityState("enemy_0", "grunt", "enemy", Vec2(1, 0), hp=1, hostile=True),
+        },
+        tiles={},
+        inventory={},
+        attrs={"skill_steps": 1},
+    )
+    call = SkillCall("go_evading", {"target": Vec2(3, 3), "mode": "evading"})
+    result = SkillEvaluator().evaluate(prev, nxt, call, get_skill_spec("go_evading"))
+
+    assert EnemyContact().evaluate(nxt, __import__("hrl_poc.skills.refs", fromlist=["EvalContext"]).EvalContext(prev, nxt, call, 10))
+    assert result.failure
+    assert result.done
+    assert result.reward == -1.0
+
+
+def test_go_shaping_rewards_progress_and_penalizes_regress():
+    spec = get_skill_spec("go")
+    call = SkillCall("go", {"target": Vec2(4, 0)})
+    prev = _world(player=Vec2(0, 0), entities={})
+    closer = _world(player=Vec2(1, 0), entities={}, skill_steps=1)
+    farther = _world(player=Vec2(0, 1), entities={}, skill_steps=1)
+
+    progress = SkillEvaluator().evaluate(prev, closer, call, spec)
+    regress = SkillEvaluator().evaluate(prev, farther, call, spec)
+
+    assert progress.reward > 0.1
+    assert regress.reward < -0.1
+
+
+def test_attack_shaping_rewards_damage_and_penalizes_player_damage():
+    spec = get_skill_spec("attack")
+    call = SkillCall("attack", {"enemy_id": "enemy_0"})
+    prev = _world(
+        player=Vec2(1, 1),
+        player_hp=5,
+        entities={"enemy_0": EntityState("enemy_0", "grunt", "enemy", Vec2(2, 1), hp=2, hostile=True)},
+    )
+    damaged_enemy = _world(
+        player=Vec2(1, 1),
+        player_hp=5,
+        entities={"enemy_0": EntityState("enemy_0", "grunt", "enemy", Vec2(2, 1), hp=1, hostile=True)},
+        skill_steps=1,
+    )
+    damaged_player = _world(
+        player=Vec2(1, 1),
+        player_hp=4,
+        entities={"enemy_0": EntityState("enemy_0", "grunt", "enemy", Vec2(2, 1), hp=2, hostile=True)},
+        skill_steps=1,
+    )
+
+    hit = SkillEvaluator().evaluate(prev, damaged_enemy, call, spec)
+    hurt = SkillEvaluator().evaluate(prev, damaged_player, call, spec)
+
+    assert hit.reward > 0.2
+    assert hurt.reward < -0.1
+
+
+def _world(
+    player: Vec2,
+    entities: dict[str, EntityState],
+    player_hp: int = 5,
+    inventory: dict[str, int] | None = None,
+    skill_steps: int = 0,
+) -> WorldState:
+    all_entities = {"player": EntityState("player", "player", "player", player, hp=player_hp, alive=player_hp > 0)}
+    all_entities.update(entities)
+    return WorldState(
+        tick=skill_steps,
+        global_position=player,
+        local_position=player,
+        region_id="gridworld",
+        player_id="player",
+        entities=all_entities,
+        tiles={},
+        inventory=inventory or {},
+        attrs={"skill_steps": skill_steps},
+    )

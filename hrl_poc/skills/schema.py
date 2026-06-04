@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
 
+from hrl_poc.semantic.state import Vec2
+
 
 class EnemyType(IntEnum):
     GRUNT = 0
@@ -15,75 +17,49 @@ class ItemType(IntEnum):
     POTION = 1
 
 
-@dataclass(frozen=True)
-class Vec2:
-    x: int
-    y: int
-
-    def to_dict(self) -> dict[str, int]:
-        return {"x": self.x, "y": self.y}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Vec2":
-        return cls(x=int(data["x"]), y=int(data["y"]))
-
-
-@dataclass(frozen=True)
+@dataclass
 class SkillSpec:
     name: str
-    skill_id: int
-    parameter_schema: dict[str, str]
-    success_predicates: list[str]
-    failure_predicates: list[str]
-    shaping_metrics: list[str]
+    params_schema: dict[str, Any]
+    success_predicates: list[Any]
+    failure_predicates: list[Any]
+    progress_rules: list[Any]
     max_steps: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "skill_id": self.skill_id,
-            "parameter_schema": dict(self.parameter_schema),
-            "success_predicates": list(self.success_predicates),
-            "failure_predicates": list(self.failure_predicates),
-            "shaping_metrics": list(self.shaping_metrics),
+            "params_schema": self.params_schema,
+            "success_predicates": [repr(predicate) for predicate in self.success_predicates],
+            "failure_predicates": [repr(predicate) for predicate in self.failure_predicates],
+            "progress_rules": [repr(rule) for rule in self.progress_rules],
             "max_steps": self.max_steps,
         }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SkillSpec":
-        return cls(
-            name=str(data["name"]),
-            skill_id=int(data["skill_id"]),
-            parameter_schema=dict(data["parameter_schema"]),
-            success_predicates=list(data["success_predicates"]),
-            failure_predicates=list(data["failure_predicates"]),
-            shaping_metrics=list(data["shaping_metrics"]),
-            max_steps=int(data["max_steps"]),
-        )
 
-
-@dataclass(frozen=True)
+@dataclass
 class SkillCall:
-    name: str
+    skill_name: str
     params: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def name(self) -> str:
+        return self.skill_name
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "name": self.name,
+            "skill_name": self.skill_name,
             "params": {key: _serialize_value(value) for key, value in self.params.items()},
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SkillCall":
+        name = str(data.get("skill_name", data.get("name")))
         params = dict(data.get("params", {}))
         for key, value in list(params.items()):
             if isinstance(value, dict) and set(value.keys()) == {"x", "y"}:
                 params[key] = Vec2.from_dict(value)
-            elif key == "enemy_type":
-                params[key] = EnemyType(value)
-            elif key == "item_type":
-                params[key] = ItemType(value)
-        return cls(name=str(data["name"]), params=params)
+        return cls(skill_name=name, params=params)
 
 
 def _serialize_value(value: Any) -> Any:

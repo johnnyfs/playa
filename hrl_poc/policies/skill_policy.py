@@ -24,6 +24,7 @@ class SkillPolicy(nn.Module):
         max_items: int = MAX_ITEMS,
         hidden_size: int = 128,
         skill_embedding_dim: int = 8,
+        condition_on_skill: bool = True,
     ):
         super().__init__()
         if not isinstance(action_space, gym.spaces.Discrete):
@@ -31,9 +32,10 @@ class SkillPolicy(nn.Module):
         self.grid_size = grid_size
         self.max_enemies = max_enemies
         self.max_items = max_items
-        self.skill_embedding = nn.Embedding(num_skills, skill_embedding_dim)
+        self.condition_on_skill = condition_on_skill
+        self.skill_embedding = nn.Embedding(num_skills, skill_embedding_dim) if condition_on_skill else None
         state_dim = grid_size * grid_size + 2 + 1 + max_enemies * 5 + max_items * 4
-        input_dim = state_dim + skill_embedding_dim + PARAM_VECTOR_SIZE
+        input_dim = state_dim + skill_embedding_dim + PARAM_VECTOR_SIZE if condition_on_skill else state_dim
         self.backbone = nn.Sequential(
             nn.Linear(input_dim, hidden_size),
             nn.Tanh(),
@@ -51,8 +53,13 @@ class SkillPolicy(nn.Module):
             max_items=self.max_items,
             device=next(self.parameters()).device,
         )
-        skill_features = self.skill_embedding(skill_ids)
-        features = torch.cat([state_features, skill_features, skill_params], dim=-1)
+        if self.condition_on_skill:
+            if self.skill_embedding is None:
+                raise RuntimeError("Skill embedding missing for skill-conditioned policy")
+            skill_features = self.skill_embedding(skill_ids)
+            features = torch.cat([state_features, skill_features, skill_params], dim=-1)
+        else:
+            features = state_features
         hidden = self.backbone(features)
         return self.actor(hidden), self.critic(hidden).squeeze(-1)
 

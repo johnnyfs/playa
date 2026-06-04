@@ -13,7 +13,7 @@ from torch.distributions import Categorical
 from hrl_poc.envs.gridworld import GridWorldEnv
 from hrl_poc.envs.wrappers import SkillConditionedEnv
 from hrl_poc.policies.skill_policy import SkillPolicy
-from hrl_poc.skills.registry import SKILL_REGISTRY
+from hrl_poc.skills.registry import SKILL_REGISTRY, get_skill_id
 from hrl_poc.training.logging import write_execution_record
 
 
@@ -29,7 +29,7 @@ def main() -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     env = SkillConditionedEnv(GridWorldEnv(), skill_name=args.skill)
-    policy = SkillPolicy(env.action_space, num_skills=len(SKILL_REGISTRY))
+    policy = SkillPolicy(env.action_space, num_skills=len(SKILL_REGISTRY), condition_on_skill=not args.disable_skill_conditioning)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
 
     eval_stats = evaluate(policy, args.skill, args.eval_episodes, args.seed + 10_000, log_dir, start_index=0)
@@ -71,6 +71,7 @@ def main() -> None:
                     "skill": args.skill,
                     "episodes": episodes_done,
                     "args": vars(args),
+                    "policy_config": {"condition_on_skill": not args.disable_skill_conditioning},
                 },
                 checkpoint_path,
             )
@@ -168,7 +169,7 @@ def update_ppo(policy: SkillPolicy, optimizer: torch.optim.Optimizer, rollout: d
             entropy_loss = -entropy.mean()
             loss = policy_loss + args.value_coef * value_loss + args.entropy_coef * entropy_loss
             if args.navigate_aux_coef > 0:
-                target_actions, mask = navigate_oracle_actions(batch_obs)
+                target_actions, mask = go_oracle_actions(batch_obs)
                 if mask.any():
                     aux_loss = nn.functional.cross_entropy(logits[mask], target_actions[mask])
                     loss = loss + args.navigate_aux_coef * aux_loss
@@ -179,12 +180,13 @@ def update_ppo(policy: SkillPolicy, optimizer: torch.optim.Optimizer, rollout: d
             optimizer.step()
 
 
-def navigate_oracle_actions(obs_batch: list[dict[str, object]]) -> tuple[torch.Tensor, torch.Tensor]:
+def go_oracle_actions(obs_batch: list[dict[str, object]]) -> tuple[torch.Tensor, torch.Tensor]:
     targets = []
     mask = []
+    go_ids = {get_skill_id("go"), get_skill_id("go_evading")}
     for obs in obs_batch:
         skill_id = int(np.asarray(obs["skill_id"]).reshape(-1)[0])
-        if skill_id != SKILL_REGISTRY["navigate"].skill_id:
+        if skill_id not in go_ids:
             targets.append(5)
             mask.append(False)
             continue
@@ -268,7 +270,7 @@ def evaluate(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a shared skill-conditioned PPO policy.")
-    parser.add_argument("--skill", choices=sorted(SKILL_REGISTRY), default="navigate")
+    parser.add_argument("--skill", choices=sorted(SKILL_REGISTRY), default="go")
     parser.add_argument("--episodes", type=int, default=400)
     parser.add_argument("--batch-episodes", type=int, default=16)
     parser.add_argument("--eval-episodes", type=int, default=8)
@@ -282,8 +284,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-epsilon", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--entropy-coef", type=float, default=0.02)
-    parser.add_argument("--navigate-aux-coef", type=float, default=2.0)
+    parser.add_argument("--go-aux-coef", "--navigate-aux-coef", dest="navigate_aux_coef", type=float, default=2.0)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument("--disable-skill-conditioning", action="store_true")
     return parser.parse_args()
 
 

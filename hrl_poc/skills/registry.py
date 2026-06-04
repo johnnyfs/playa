@@ -1,71 +1,101 @@
 from __future__ import annotations
 
-from hrl_poc.skills.schema import EnemyType, ItemType, SkillCall, SkillSpec, Vec2
+from typing import Any
+
+from hrl_poc.semantic.state import Vec2
+from hrl_poc.skills.evaluator import ProgressRule
+from hrl_poc.skills.metrics import ContactFlag, Distance, EnemyProximity, Health, InventoryCount
+from hrl_poc.skills.predicates import Alive, And, Dead, EnemyContact, HasInventoryItem, Near, Timeout
+from hrl_poc.skills.refs import EntityByIdRef, EntityPosRef, ParamRef, PlayerRef
+from hrl_poc.skills.schema import SkillCall, SkillSpec
+
+
+PLAYER = PlayerRef()
 
 
 SKILL_REGISTRY: dict[str, SkillSpec] = {
-    "navigate": SkillSpec(
-        name="navigate",
-        skill_id=0,
-        parameter_schema={"goal": "Vec2"},
-        success_predicates=["at_goal"],
-        failure_predicates=["player_dead", "timeout"],
-        shaping_metrics=["progress_to_goal"],
+    "go": SkillSpec(
+        name="go",
+        params_schema={"target": Vec2},
+        success_predicates=[Near(PLAYER, ParamRef("target"), radius=0)],
+        failure_predicates=[Timeout(), Dead(PLAYER)],
+        progress_rules=[ProgressRule(Distance(PLAYER, ParamRef("target")), direction="decrease", weight=0.18)],
         max_steps=48,
     ),
-    "avoid": SkillSpec(
-        name="avoid",
-        skill_id=1,
-        parameter_schema={"goal": "Vec2"},
-        success_predicates=["at_goal_and_safe"],
-        failure_predicates=["player_dead", "timeout"],
-        shaping_metrics=["progress_to_goal", "distance_from_enemies"],
+    "go_evading": SkillSpec(
+        name="go_evading",
+        params_schema={"target": Vec2, "mode": "evading"},
+        success_predicates=[Near(PLAYER, ParamRef("target"), radius=0)],
+        failure_predicates=[EnemyContact(radius=1), Timeout(), Dead(PLAYER)],
+        progress_rules=[
+            ProgressRule(Distance(PLAYER, ParamRef("target")), direction="decrease", weight=0.16),
+            ProgressRule(EnemyProximity(PLAYER), direction="decrease", weight=0.08),
+            ProgressRule(ContactFlag(), direction="decrease", weight=0.2),
+        ],
         max_steps=56,
     ),
-    "fight": SkillSpec(
-        name="fight",
-        skill_id=2,
-        parameter_schema={"enemy_type": "EnemyType", "target": "Vec2"},
-        success_predicates=["target_enemy_dead"],
-        failure_predicates=["player_dead", "timeout", "target_enemy_missing"],
-        shaping_metrics=["progress_to_target", "target_enemy_damage"],
-        max_steps=36,
+    "attack": SkillSpec(
+        name="attack",
+        params_schema={"enemy_id": str},
+        success_predicates=[And(Dead(EntityByIdRef(ParamRef("enemy_id"))), Alive(PLAYER))],
+        failure_predicates=[Timeout(), Dead(PLAYER)],
+        progress_rules=[
+            ProgressRule(Health(EntityByIdRef(ParamRef("enemy_id"))), direction="decrease", weight=0.35),
+            ProgressRule(Health(PLAYER), direction="increase", weight=0.15),
+            ProgressRule(Distance(PLAYER, EntityPosRef(EntityByIdRef(ParamRef("enemy_id")))), direction="decrease", weight=0.12),
+        ],
+        max_steps=40,
     ),
-    "pickup": SkillSpec(
-        name="pickup",
-        skill_id=3,
-        parameter_schema={"item_type": "ItemType", "target": "Vec2"},
-        success_predicates=["target_item_collected"],
-        failure_predicates=["player_dead", "timeout", "target_item_missing"],
-        shaping_metrics=["progress_to_target"],
+    "collect": SkillSpec(
+        name="collect",
+        params_schema={"item_id": str},
+        success_predicates=[HasInventoryItem(ParamRef("item_id"))],
+        failure_predicates=[Timeout(), Dead(PLAYER)],
+        progress_rules=[
+            ProgressRule(Distance(PLAYER, EntityPosRef(EntityByIdRef(ParamRef("item_id")))), direction="decrease", weight=0.16),
+            ProgressRule(InventoryCount(ParamRef("item_id")), direction="increase", weight=0.25),
+        ],
         max_steps=48,
     ),
 }
 
 
-def get_skill_spec(name: str) -> SkillSpec:
+SKILL_IDS: dict[str, int] = {name: idx for idx, name in enumerate(SKILL_REGISTRY)}
+
+ALIASES = {
+    "navigate": "go",
+    "avoid": "go_evading",
+    "fight": "attack",
+    "pickup": "collect",
+}
+
+
+def canonical_skill_name(name: str, params: dict[str, Any] | None = None) -> str:
+    if name == "go" and params and params.get("mode") == "evading":
+        return "go_evading"
+    return ALIASES.get(name, name)
+
+
+def get_skill_spec(name: str, params: dict[str, Any] | None = None) -> SkillSpec:
+    canonical = canonical_skill_name(name, params)
     try:
-        return SKILL_REGISTRY[name]
+        return SKILL_REGISTRY[canonical]
     except KeyError as exc:
         known = ", ".join(sorted(SKILL_REGISTRY))
         raise ValueError(f"Unknown skill {name!r}. Known skills: {known}") from exc
 
 
+def get_skill_id(name: str, params: dict[str, Any] | None = None) -> int:
+    return SKILL_IDS[get_skill_spec(name, params).name]
+
+
 def make_skill_call(name: str, **params: object) -> SkillCall:
-    if name in {"navigate", "avoid"}:
-        goal = params.get("goal")
-        if isinstance(goal, tuple):
-            params["goal"] = Vec2(int(goal[0]), int(goal[1]))
-    elif name == "fight":
-        enemy_type = params.get("enemy_type", EnemyType.GRUNT)
-        params["enemy_type"] = EnemyType(enemy_type)
-        target = params.get("target")
-        if isinstance(target, tuple):
-            params["target"] = Vec2(int(target[0]), int(target[1]))
-    elif name == "pickup":
-        item_type = params.get("item_type", ItemType.COIN)
-        params["item_type"] = ItemType(item_type)
-        target = params.get("target")
-        if isinstance(target, tuple):
-            params["target"] = Vec2(int(target[0]), int(target[1]))
-    return SkillCall(name=name, params=dict(params))
+    canonical = canonical_skill_name(name, params)
+    if "goal" in params and "target" not in params:
+        params["target"] = params.pop("goal")
+    target = params.get("target")
+    if isinstance(target, tuple):
+        params["target"] = Vec2(int(target[0]), int(target[1]))
+    if canonical == "go_evading":
+        params.setdefault("mode", "evading")
+    return SkillCall(skill_name=canonical, params=dict(params))

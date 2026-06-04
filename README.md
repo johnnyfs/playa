@@ -36,29 +36,61 @@ uv run pytest
 
 ## Train A Skill
 
-Train `Navigate(goal)` online:
+Train `go(target)` online:
 
 ```bash
-uv run python -m hrl_poc.training.train_skill --skill navigate
+uv run python -m hrl_poc.training.train_skill --skill go
 ```
 
 Short smoke run:
 
 ```bash
-uv run python -m hrl_poc.training.train_skill --skill navigate --episodes 16 --batch-episodes 4 --eval-episodes 2
+uv run python -m hrl_poc.training.train_skill --skill go --episodes 16 --batch-episodes 4 --eval-episodes 2
 ```
 
 Other predefined skills:
 
 ```bash
-uv run python -m hrl_poc.training.train_skill --skill fight
-uv run python -m hrl_poc.training.train_skill --skill pickup
-uv run python -m hrl_poc.training.train_skill --skill avoid
+uv run python -m hrl_poc.training.train_skill --skill attack
+uv run python -m hrl_poc.training.train_skill --skill collect
+uv run python -m hrl_poc.training.train_skill --skill go_evading
 ```
+
+Train one shared policy over a fixed skill mix:
+
+```bash
+uv run python -m hrl_poc.training.train_multi_skill --skills go,collect,attack
+```
+
+Longer training sweep with matched-seed checkpoint evaluation:
+
+```bash
+uv run python -m hrl_poc.training.sweep_skill --skill go --episodes 1024 --compare-baseline
+```
+
+Direct checkpoint comparison:
+
+```bash
+uv run python -m hrl_poc.training.evaluate_skill --checkpoint runs/.../checkpoints/skill_policy_001024.pt --baseline-checkpoint runs/.../checkpoints/skill_policy_000000.pt --episodes 200 --json
+```
+
+Compare a trained checkpoint against random, untrained, and optional non-conditioned baselines:
+
+```bash
+uv run python -m hrl_poc.training.benchmark_skill --checkpoint runs/.../checkpoints/skill_policy_001024.pt --skill go --episodes 200 --nonconditioned-checkpoint runs/.../checkpoints/skill_policy_001024.pt
+```
+
+Sweep summary table:
+
+```bash
+uv run python -m hrl_poc.training.summarize_sweeps --run-dir runs/sweep_go --markdown
+```
+
+The summary table shows `seed`, `checkpoint_episodes`, `success_rate`, and `delta_vs_previous_checkpoint` within the same run. That delta is the right default comparison for a checkpoint curve; cross-seed comparison is a separate analysis.
 
 Training prints JSON metrics with success rate, average episode length, and average reward. Checkpoints are written under `runs/<skill>_<timestamp>/checkpoints`.
 
-`Navigate(goal)` also uses a small online auxiliary shortest-path action loss by default. It is there to make the Phase 1 learning demo reliable in a tiny repo; set `--navigate-aux-coef 0` to run only the PPO losses.
+`go(target)` also uses a small online auxiliary shortest-path action loss by default. It is there to make the Phase 1 learning demo reliable in a tiny repo; set `--go-aux-coef 0` to run only the PPO losses.
 
 ## Execution Logs
 
@@ -66,14 +98,14 @@ Every evaluated episode writes a JSONL record:
 
 ```json
 {
-  "skill_call": {"name": "navigate", "params": {"goal": {"x": 5, "y": 3}}},
+  "skill_call": {"skill_name": "go", "params": {"target": {"x": 5, "y": 3}}},
   "initial_summary": {},
   "final_summary": {},
   "success": true,
   "failure_reason": null,
   "reward_total": 1.2,
   "steps": 8,
-  "trajectory_path": "runs/navigate_.../eval/trajectories/episode_000000.json"
+  "trajectory_path": "runs/go_.../eval/trajectories/episode_000000.json"
 }
 ```
 
