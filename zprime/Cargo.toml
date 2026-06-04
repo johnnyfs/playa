@@ -1,0 +1,13 @@
+[package]
+name = "zprime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[features]
+default = ["headless"]
+headless = []
+visual = ["headless", "bevy/2d"]
+
+[dependencies]
+bevy = { version = "0.18.0", default-features = false, features = ["std"] }
