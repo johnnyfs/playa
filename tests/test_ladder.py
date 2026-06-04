@@ -140,6 +140,21 @@ def test_competence_frontier_file_is_written(tmp_path: Path):
     assert frontier["levels"]["tiny_go"]["status"] == "passed"
 
 
+def test_released_checkpoint_is_written_when_level_passes(tmp_path: Path):
+    config_path = _write_tiny_ladder(tmp_path, max_steps=5, pass_rate=1.0)
+
+    run_ladder(config_path, reports_dir=tmp_path / "reports", competence_dir=tmp_path / "competence")
+
+    manifest = json.loads((tmp_path / "competence" / "go_released.json").read_text())
+    released_path = Path(manifest["released_checkpoint"])
+    frontier = json.loads((tmp_path / "competence" / "go.json").read_text())
+
+    assert released_path.exists()
+    assert manifest["skill"] == "go"
+    assert frontier["released_checkpoint"]["released_checkpoint"] == str(released_path)
+    assert frontier["released_checkpoint"]["level_id"] == "tiny_go"
+
+
 def test_failure_report_is_written_when_pass_rate_below_threshold(tmp_path: Path):
     config_path = _write_tiny_ladder(tmp_path, max_steps=0, pass_rate=1.0)
 

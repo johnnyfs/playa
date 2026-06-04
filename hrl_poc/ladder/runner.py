@@ -44,6 +44,7 @@ def run_ladder(
     level_results: list[LevelEvalResult] = []
     frontier = _initial_frontier(config)
     latest_passed_checkpoint = None
+    released_artifact = None
 
     for level_idx, level in enumerate(levels):
         active_level = _with_max_eval_seeds(level, max_eval_seeds)
@@ -68,10 +69,21 @@ def run_ladder(
         if result.passed:
             latest_passed_checkpoint = checkpoint
             frontier["latest_passed_level"] = active_level.id
+            released_artifact = _write_released_checkpoint(
+                competence_dir,
+                config.skill,
+                checkpoint,
+                level_id=active_level.id,
+                pass_rate=result.pass_rate,
+                required_pass_rate=result.required_pass_rate,
+            )
         else:
             _write_failure_report(failure_dir, result)
             if not continue_on_failure:
                 break
+
+    if released_artifact is not None:
+        frontier["released_checkpoint"] = released_artifact
 
     _write_level_results(run_dir, level_results)
     _write_summary(run_dir, config, level_results)
@@ -111,6 +123,7 @@ def _initial_frontier(config: LadderConfig) -> dict[str, Any]:
     return {
         "skill": config.skill,
         "latest_passed_level": None,
+        "released_checkpoint": None,
         "levels": {
             level.id: {
                 "status": "untried",
@@ -180,6 +193,7 @@ def _write_summary(run_dir: Path, config: LadderConfig, results: list[LevelEvalR
         [
             "",
             "Failures are written under `failures/`; per-episode trajectories are under `trajectories/`.",
+            "Released checkpoints are copied into `competence/` when a level passes.",
         ]
     )
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -189,6 +203,34 @@ def _write_frontier(competence_dir: str | Path, skill: str, frontier: dict[str, 
     path = Path(competence_dir) / f"{skill}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(frontier, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_released_checkpoint(
+    competence_dir: str | Path,
+    skill: str,
+    checkpoint: Any,
+    level_id: str,
+    pass_rate: float,
+    required_pass_rate: float,
+) -> dict[str, Any]:
+    competence_path = Path(competence_dir)
+    competence_path.mkdir(parents=True, exist_ok=True)
+    source_path = Path(checkpoint.path)
+    suffix = source_path.suffix or ".ckpt"
+    released_path = competence_path / f"{skill}_released{suffix}"
+    shutil.copy2(source_path, released_path)
+    manifest = {
+        "skill": skill,
+        "level_id": level_id,
+        "source_checkpoint": str(source_path),
+        "released_checkpoint": str(released_path),
+        "trainer": checkpoint.trainer,
+        "pass_rate": pass_rate,
+        "required_pass_rate": required_pass_rate,
+        "metadata": dict(checkpoint.metadata),
+    }
+    (competence_path / f"{skill}_released.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest
 
 
 def _mean(values: Any) -> float | None:

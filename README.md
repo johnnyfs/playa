@@ -146,6 +146,8 @@ The current competence frontier is written to:
 competence/go.json
 ```
 
+When a level passes, the latest released checkpoint is copied into `competence/go_released.*` and a manifest is written to `competence/go_released.json`.
+
 The runner currently provides `HeuristicGoTrainer` and `RandomPolicyTrainer` implementations behind a small trainer interface. The heuristic trainer is a sanity check that proves the ladder plumbing works; PPO can replace it later without changing ladder configs, report formats, or competence frontier semantics.
 
 An opt-in PPO trainer is also available:
@@ -162,7 +164,7 @@ For focused PPO iteration on one level:
 uv run ladder --config ladders/go.yaml --trainer ppo --only-level go_l0_one_step_empty --max-eval-seeds 4
 ```
 
-PPO checkpoints include compact training metrics (`steps_done`, `episodes_done`, update count, train success rate, average reward, and average episode length). These are copied into `level_results.json`, `summary.md`, and `competence/go.json`.
+PPO checkpoints include compact training metrics (`steps_done`, `episodes_done`, update count, train success rate, average reward, and average episode length). These are copied into `level_results.json`, `summary.md`, and `competence/go.json`, and the latest passed checkpoint is published to `competence/go_released.*`.
 
 ## Execution Logs
 
