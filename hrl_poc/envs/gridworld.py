@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from enum import IntEnum
 from typing import Any
 
@@ -53,6 +54,11 @@ class GridWorldEnv(gym.Env):
         self.items: list[dict[str, Any]] = []
         self.inventory: dict[str, int] = {}
         self.enemy_contact = False
+        self.movement_blocked = False
+        self.facing = "down"
+        self.active_sword_hitbox: dict[str, int] | None = None
+        self.screen_width_tiles = size
+        self.screen_height_tiles = size
         self.steps = 0
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
@@ -64,6 +70,9 @@ class GridWorldEnv(gym.Env):
         self.items = []
         self.inventory = {}
         self.enemy_contact = False
+        self.movement_blocked = False
+        self.active_sword_hitbox = None
+        self.facing = str(options.get("facing", "down"))
         self.health = int(options.get("health", START_HEALTH))
 
         if options:
@@ -80,6 +89,8 @@ class GridWorldEnv(gym.Env):
         action = int(action)
         reward = -0.01
         self.enemy_contact = False
+        self.movement_blocked = False
+        self.active_sword_hitbox = None
 
         if action in (Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT):
             self._move(action)
@@ -105,11 +116,16 @@ class GridWorldEnv(gym.Env):
             "items": [dict(item) for item in self.items],
             "inventory": dict(self.inventory),
             "enemy_contact": bool(self.enemy_contact),
+            "movement_blocked": bool(self.movement_blocked),
+            "facing": self.facing,
+            "active_sword_hitbox": dict(self.active_sword_hitbox) if self.active_sword_hitbox else None,
             "steps": int(self.steps),
         }
 
     def world_state(self) -> WorldState:
         player_pos = Vec2(int(self.player[0]), int(self.player[1]))
+        screen_x = player_pos.x // max(1, self.screen_width_tiles)
+        screen_y = player_pos.y // max(1, self.screen_height_tiles)
         entities = {
             "player": EntityState(
                 id="player",
@@ -162,7 +178,16 @@ class GridWorldEnv(gym.Env):
             entities=entities,
             tiles=tiles,
             inventory=dict(self.inventory),
-            attrs={"enemy_contact": bool(self.enemy_contact), "size": self.size},
+            attrs={
+                "enemy_contact": bool(self.enemy_contact),
+                "movement_blocked": bool(self.movement_blocked),
+                "size": self.size,
+                "screen_position": {"x": int(screen_x), "y": int(screen_y)},
+                "player_hitbox": {"x": player_pos.x, "y": player_pos.y, "w": 1, "h": 1},
+                "player_facing": self.facing,
+                "terrain_grid": self.terrain.astype(int).tolist(),
+                "active_sword_hitbox": dict(self.active_sword_hitbox) if self.active_sword_hitbox else None,
+            },
         )
 
     def get_summary(self) -> dict[str, Any]:
@@ -192,6 +217,8 @@ class GridWorldEnv(gym.Env):
             ],
             "inventory": dict(self.inventory),
             "enemy_contact": bool(self.enemy_contact),
+            "movement_blocked": bool(self.movement_blocked),
+            "facing": self.facing,
             "steps": int(self.steps),
         }
 
@@ -234,6 +261,8 @@ class GridWorldEnv(gym.Env):
             for idx, item in enumerate(options.get("items", []))
         ][: self.max_items]
         self.inventory = dict(options.get("inventory", {}))
+        self.screen_width_tiles = int(options.get("screen_width_tiles", self.size))
+        self.screen_height_tiles = int(options.get("screen_height_tiles", self.size))
 
     def _random_reset(self) -> None:
         wall_count = 14
@@ -275,11 +304,31 @@ class GridWorldEnv(gym.Env):
             Action.LEFT: (-1, 0),
             Action.RIGHT: (1, 0),
         }[Action(action)]
+        self.facing = {
+            Action.UP: "up",
+            Action.DOWN: "down",
+            Action.LEFT: "left",
+            Action.RIGHT: "right",
+        }[Action(action)]
         target = self.player + np.array([dx, dy], dtype=np.int16)
-        if self._is_walkable(tuple(int(v) for v in target)):
+        if self.is_walkable(tuple(int(v) for v in target)):
             self.player = target
+        else:
+            self.movement_blocked = True
 
     def _attack(self) -> float:
+        fx, fy = {
+            "up": (0, -1),
+            "down": (0, 1),
+            "left": (-1, 0),
+            "right": (1, 0),
+        }.get(self.facing, (0, 1))
+        self.active_sword_hitbox = {
+            "x": int(self.player[0] + fx),
+            "y": int(self.player[1] + fy),
+            "w": 1,
+            "h": 1,
+        }
         for enemy in self.enemies:
             if enemy["alive"] and _manhattan(self.player, enemy["pos"]) <= 1:
                 enemy["hp"] -= 1
@@ -315,7 +364,7 @@ class GridWorldEnv(gym.Env):
             }[Action(action)]
             target = enemy["pos"] + np.array([dx, dy], dtype=np.int16)
             target_tuple = tuple(int(v) for v in target)
-            if target_tuple != tuple(int(v) for v in self.player) and self._is_walkable(target_tuple):
+            if target_tuple != tuple(int(v) for v in self.player) and self.is_walkable(target_tuple):
                 enemy["pos"] = target
 
     def _enemy_contact_damage(self) -> None:
@@ -337,8 +386,51 @@ class GridWorldEnv(gym.Env):
         raise RuntimeError("Could not sample an empty GridWorld cell")
 
     def _is_walkable(self, pos: tuple[int, int]) -> bool:
+        return self.is_walkable(pos)
+
+    def is_walkable(self, pos: tuple[int, int]) -> bool:
         x, y = pos
         return 0 <= x < self.size and 0 <= y < self.size and self.terrain[y, x] == 0
+
+    def path_exists(self, start: tuple[int, int], target: tuple[int, int]) -> bool:
+        if not self.is_walkable(start) or not self.is_walkable(target):
+            return False
+        queue: deque[tuple[int, int]] = deque([start])
+        seen = {start}
+        while queue:
+            x, y = queue.popleft()
+            if (x, y) == target:
+                return True
+            for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+                nxt = (x + dx, y + dy)
+                if nxt not in seen and self.is_walkable(nxt):
+                    seen.add(nxt)
+                    queue.append(nxt)
+        return False
+
+    def distance(self, a: tuple[int, int], b: tuple[int, int]) -> int:
+        return abs(int(a[0]) - int(b[0])) + abs(int(a[1]) - int(b[1]))
+
+    def screen_transition_possible(self, from_screen: tuple[int, int], to_screen: tuple[int, int]) -> bool:
+        from_x, from_y = from_screen
+        to_x, to_y = to_screen
+        if abs(from_x - to_x) + abs(from_y - to_y) != 1:
+            return False
+        if to_x > from_x:
+            x1, x2 = (from_x + 1) * self.screen_width_tiles - 1, to_x * self.screen_width_tiles
+            ys = range(from_y * self.screen_height_tiles, (from_y + 1) * self.screen_height_tiles)
+            return any(self.is_walkable((x1, y)) and self.is_walkable((x2, y)) for y in ys)
+        if to_x < from_x:
+            x1, x2 = from_x * self.screen_width_tiles, (to_x + 1) * self.screen_width_tiles - 1
+            ys = range(from_y * self.screen_height_tiles, (from_y + 1) * self.screen_height_tiles)
+            return any(self.is_walkable((x1, y)) and self.is_walkable((x2, y)) for y in ys)
+        if to_y > from_y:
+            y1, y2 = (from_y + 1) * self.screen_height_tiles - 1, to_y * self.screen_height_tiles
+            xs = range(from_x * self.screen_width_tiles, (from_x + 1) * self.screen_width_tiles)
+            return any(self.is_walkable((x, y1)) and self.is_walkable((x, y2)) for x in xs)
+        y1, y2 = from_y * self.screen_height_tiles, (to_y + 1) * self.screen_height_tiles - 1
+        xs = range(from_x * self.screen_width_tiles, (from_x + 1) * self.screen_width_tiles)
+        return any(self.is_walkable((x, y1)) and self.is_walkable((x, y2)) for x in xs)
 
 
 def _manhattan(a: np.ndarray, b: np.ndarray) -> int:

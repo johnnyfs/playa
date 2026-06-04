@@ -92,6 +92,62 @@ Training prints JSON metrics with success rate, average episode length, and aver
 
 `go(target)` also uses a small online auxiliary shortest-path action loss by default. It is there to make the Phase 1 learning demo reliable in a tiny repo; set `--go-aux-coef 0` to run only the PPO losses.
 
+## Competence Ladder Harness
+
+The competence ladder is a semi-automated validation harness for fixed low-level skills. It runs curriculum levels in order:
+
+```text
+Skill -> Ladder -> Level -> Train -> Evaluate -> Promote/Fail -> Report
+```
+
+The ladder harness validates skills before they are exposed to a high-level planner.
+A skill is not considered available at full complexity until it passes held-out randomized evaluations.
+Failures are logged in a form that a future agent can inspect to adjust curriculum, model architecture, or skill definitions.
+
+The first fully wired ladder is `go(target)`. The harness can generate deterministic curriculum worlds from `WorldSpec`, including empty rooms, border walls, and a single-wall detour terrain. Each held-out episode records the semantic state, target, trajectory, reward total, failure reason, blocked movement diagnostics, final distance, stuck detection, and timeout progress.
+
+Run the `go` ladder:
+
+```bash
+uv run ladder --config ladders/go.yaml
+```
+
+Equivalent module form:
+
+```bash
+uv run python -m hrl_poc.ladder.runner --config ladders/go.yaml
+```
+
+For a quick smoke run:
+
+```bash
+uv run ladder --config ladders/go.yaml --max-eval-seeds 2
+```
+
+Promotion is config-driven. Each level declares `eval.heldout_seeds` and `eval.pass_rate`; the runner evaluates held-out seeds and promotes only when the observed pass rate meets or exceeds the configured threshold. By default, the run stops at the first failed promotion. Use `--continue-on-failure` to keep evaluating later levels.
+
+Reports are written under:
+
+```text
+reports/
+  go/
+    run_YYYYMMDD_HHMMSS/
+      config.yaml
+      level_results.json
+      summary.md
+      checkpoints/
+      failures/
+      trajectories/
+```
+
+The current competence frontier is written to:
+
+```text
+competence/go.json
+```
+
+The runner currently provides `HeuristicGoTrainer` and `RandomPolicyTrainer` implementations behind a small trainer interface. The heuristic trainer is a sanity check that proves the ladder plumbing works; PPO can replace it later without changing ladder configs, report formats, or competence frontier semantics.
+
 ## Execution Logs
 
 Every evaluated episode writes a JSONL record:
@@ -117,5 +173,6 @@ These records are intentionally compact. They are meant to become the future bri
 - Test authoring: add or modify predicate names in a `SkillSpec`.
 - Evaluator: read execution records and trajectories, then explain failures.
 - Curriculum: generate distributions over skill calls based on recent success rates.
+- Competence gating: read `competence/<skill>.json` and expose only skills/levels that passed held-out ladder evaluation.
 
 The current code keeps those boundaries explicit: schema in `hrl_poc/skills/schema.py`, executable predicates in `hrl_poc/skills/predicates.py`, skill-to-episode conversion in `hrl_poc/envs/wrappers.py`, and execution records in `hrl_poc/training/logging.py`.

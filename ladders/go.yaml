@@ -1,0 +1,87 @@
+skill: go
+levels:
+  - id: go_l0_one_step_empty
+    description: Move a very short distance in an empty screen.
+    world:
+      world_width_screens: 1
+      world_height_screens: 1
+      terrain: Empty
+    task:
+      target_distance_px: 16
+      target_radius_px: 4
+      max_steps: 30
+    train:
+      seeds: 128
+      steps: 20000
+    eval:
+      heldout_seeds: 32
+      pass_rate: 0.95
+
+  - id: go_l1_short_empty
+    description: Move a short distance in an empty screen.
+    world:
+      world_width_screens: 1
+      world_height_screens: 1
+      terrain: Empty
+    task:
+      target_distance_px: 64
+      target_radius_px: 4
+      max_steps: 80
+    train:
+      seeds: 256
+      steps: 50000
+    eval:
+      heldout_seeds: 64
+      pass_rate: 0.95
+
+  - id: go_l2_cross_screen_empty
+    description: Move across an empty screen with border walls.
+    world:
+      world_width_screens: 1
+      world_height_screens: 1
+      terrain: BorderWalls
+    task:
+      target_distance_px: 160
+      target_radius_px: 4
+      max_steps: 200
+    train:
+      seeds: 512
+      steps: 100000
+    eval:
+      heldout_seeds: 64
+      pass_rate: 0.90
+
+  - id: go_l3_two_screen_transition
+    description: Navigate from one screen into an adjacent screen.
+    world:
+      world_width_screens: 2
+      world_height_screens: 1
+      terrain: BorderWalls
+    task:
+      target_screen_offset: [1, 0]
+      target_distance_px: 80
+      target_radius_px: 4
+      max_steps: 300
+    train:
+      seeds: 512
+      steps: 150000
+    eval:
+      heldout_seeds: 64
+      pass_rate: 0.85
+
+  - id: go_l4_simple_wall_detour
+    description: Reach target around a simple obstruction.
+    world:
+      world_width_screens: 1
+      world_height_screens: 1
+      terrain: SingleWall
+    task:
+      target_distance_px: 120
+      target_radius_px: 4
+      max_steps: 250
+    train:
+      seeds: 1024
+      steps: 200000
+    eval:
+      heldout_seeds: 128
+      pass_rate: 0.80
