@@ -120,7 +120,7 @@ class BaseGoTrainer:
         for idx in range(level.eval.heldout_seeds):
             seed = int(seed_base + idx)
             world, target = generate_go_task(level.world, level.task, seed)
-            skill_call = SkillCall("go", {"target": target})
+            skill_call = _go_skill_call(world, target)
             path = None
             if trajectory_dir is not None:
                 path = trajectory_dir / f"{level.id}_seed_{seed}.json"
@@ -291,7 +291,7 @@ class PpoGoTrainer(BaseGoTrainer):
         for idx in range(level.eval.heldout_seeds):
             seed = int(seed_base + idx)
             world, target = generate_go_task(level.world, level.task, seed)
-            skill_call = SkillCall("go", {"target": target})
+            skill_call = _go_skill_call(world, target)
             path = None
             if trajectory_dir is not None:
                 path = trajectory_dir / f"{level.id}_seed_{seed}.json"
@@ -303,7 +303,12 @@ class PpoGoTrainer(BaseGoTrainer):
                 seed=seed,
                 target_radius_px=target_radius,
             )
-            episode_results.append(episode.run(PpoEpisodePolicy(policy), trajectory_path=path))
+            episode_results.append(
+                episode.run(
+                    PpoEpisodePolicy(policy, level.world.screen_width_tiles, level.world.screen_height_tiles),
+                    trajectory_path=path,
+                )
+            )
 
         successes = sum(1 for result in episode_results if result.success)
         episodes = len(episode_results)
@@ -339,14 +344,14 @@ class PpoGoTrainer(BaseGoTrainer):
             world, target = generate_go_task(level.world, level.task, seed)
             env = world.env()
             raw_obs = env._observation()
-            skill_call = SkillCall("go", {"target": target})
+            skill_call = _go_skill_call(world, target)
             prev_distance = _distance_px(tuple(int(v) for v in raw_obs["player"]), target, level.world)
             episode_rewards_current = []
             success = False
             failure_reason = None
 
             for step_idx in range(1, max_steps + 1):
-                obs = _augment_obs(raw_obs, skill_call)
+                obs = _augment_obs(raw_obs, skill_call, level.world.screen_width_tiles, level.world.screen_height_tiles)
                 action, log_prob, value = policy.act(obs)
                 next_raw_obs, _base_reward, terminated, _truncated, info = env.step(action)
                 player = (int(info["player"]["x"]), int(info["player"]["y"]))
@@ -512,11 +517,13 @@ class HeuristicGoPolicy:
 
 
 class PpoEpisodePolicy:
-    def __init__(self, policy: SkillPolicy):
+    def __init__(self, policy: SkillPolicy, screen_width_tiles: int, screen_height_tiles: int):
         self.policy = policy
+        self.screen_width_tiles = screen_width_tiles
+        self.screen_height_tiles = screen_height_tiles
 
     def act(self, observation: dict[str, Any], info: dict[str, Any], skill_call: SkillCall) -> int:
-        obs = _augment_obs(observation, skill_call)
+        obs = _augment_obs(observation, skill_call, self.screen_width_tiles, self.screen_height_tiles)
         action, _log_prob, _value = self.policy.act(obs, deterministic=True)
         return int(action)
 
@@ -594,16 +601,28 @@ def _greedy_action(terrain: np.ndarray, player: tuple[int, int], goal: tuple[int
     return candidates[0][1]
 
 
-def _augment_obs(raw_obs: dict[str, Any], skill_call: SkillCall) -> dict[str, Any]:
+def _augment_obs(
+    raw_obs: dict[str, Any],
+    skill_call: SkillCall,
+    screen_width_tiles: int | None = None,
+    screen_height_tiles: int | None = None,
+) -> dict[str, Any]:
     terrain = np.asarray(raw_obs["terrain"])
     player = np.asarray(raw_obs["player"], dtype=np.float32)
     target = _target(skill_call)
     scale = max(1, terrain.shape[0] - 1)
     skill_params = np.zeros(5, dtype=np.float32)
-    skill_params[0] = target.x / scale
-    skill_params[1] = target.y / scale
-    skill_params[3] = (target.x - player[0]) / scale
-    skill_params[4] = (target.y - player[1]) / scale
+    delta_x = target.x - player[0]
+    delta_y = target.y - player[1]
+    distance = abs(delta_x) + abs(delta_y)
+    screen_width_tiles = max(1, int(screen_width_tiles or terrain.shape[1]))
+    screen_height_tiles = max(1, int(screen_height_tiles or terrain.shape[0]))
+    player_screen = (int(player[0]) // screen_width_tiles, int(player[1]) // screen_height_tiles)
+    target_screen = (target.x // screen_width_tiles, target.y // screen_height_tiles)
+    skill_params[0] = delta_x / scale
+    skill_params[1] = delta_y / scale
+    skill_params[2] = distance / scale
+    skill_params[4] = 1.0 if target_screen != player_screen else 0.0
     return {
         "state": raw_obs,
         "skill_id": np.array([get_skill_id("go")], dtype=np.int64),
@@ -640,6 +659,21 @@ def _go_oracle_actions(obs_batch: list[dict[str, Any]]) -> torch.Tensor:
         terrain = np.asarray(state["terrain"])
         player = tuple(int(v) for v in np.asarray(state["player"]).reshape(-1)[:2])
         params = np.asarray(obs["skill_params"], dtype=np.float32)
-        goal = np.rint(params[:2] * (terrain.shape[0] - 1)).astype(np.int64)
+        delta = np.rint(params[:2] * (terrain.shape[0] - 1)).astype(np.int64)
+        goal = (player[0] + int(delta[0]), player[1] + int(delta[1]))
         targets.append(shortest_path_action(terrain, player, (int(goal[0]), int(goal[1]))))
     return torch.as_tensor(targets, dtype=torch.long)
+
+
+def _go_skill_call(world: Any, target: Vec2) -> SkillCall:
+    player = tuple(int(v) for v in world.player)
+    delta = Vec2(int(target.x - player[0]), int(target.y - player[1]))
+    distance_px = (abs(delta.x) + abs(delta.y)) * int(world.spec.tile_size_px)
+    return SkillCall(
+        "go",
+        {
+            "target": target,
+            "target_delta": delta,
+            "distance_px": int(distance_px),
+        },
+    )

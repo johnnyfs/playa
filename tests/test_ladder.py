@@ -16,6 +16,7 @@ from hrl_poc.ladder.world import (
     generate_walls,
     generate_world,
     path_exists,
+    validate_go_task,
 )
 from hrl_poc.semantic.state import Vec2
 from hrl_poc.skills.schema import SkillCall
@@ -128,6 +129,8 @@ def test_ladder_runner_runs_tiny_level_with_heuristic_policy(tmp_path: Path):
     results = json.loads((run_dir / "level_results.json").read_text())
     assert results[0]["passed"] is True
     assert (run_dir / "summary.md").exists()
+    assert (run_dir / "summary.html").exists()
+    assert "<svg" in (run_dir / "summary.html").read_text()
 
 
 def test_competence_frontier_file_is_written(tmp_path: Path):
@@ -212,6 +215,14 @@ def test_ladder_runner_only_level_runs_selected_level(tmp_path: Path):
 
     results = json.loads((run_dir / "level_results.json").read_text())
     assert [result["level_id"] for result in results] == ["tiny_go_l1"]
+
+
+def test_go_validation_detects_impossible_cross_screen_task():
+    spec = WorldSpec(world_width_screens=1, world_height_screens=1, terrain=TerrainSpec.EMPTY)
+    validation = validate_go_task(spec, {"target_screen_offset": [1, 0], "target_distance_px": 16}, seed=1)
+
+    assert not validation.possible
+    assert not validation.screen_transition_possible
 
 
 def _write_tiny_ladder(tmp_path: Path, max_steps: int, pass_rate: float, train_steps: int = 1) -> Path:

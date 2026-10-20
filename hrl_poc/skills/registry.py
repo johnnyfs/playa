@@ -96,6 +96,11 @@ def make_skill_call(name: str, **params: object) -> SkillCall:
     target = params.get("target")
     if isinstance(target, tuple):
         params["target"] = Vec2(int(target[0]), int(target[1]))
+    if "delta" in params and "target_delta" not in params:
+        params["target_delta"] = params.pop("delta")
+    delta = params.get("target_delta")
+    if isinstance(delta, tuple):
+        params["target_delta"] = Vec2(int(delta[0]), int(delta[1]))
     if canonical == "go_evading":
         params.setdefault("mode", "evading")
     return SkillCall(skill_name=canonical, params=dict(params))

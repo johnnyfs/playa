@@ -148,11 +148,18 @@ def encode_skill_params(skill_call: SkillCall, env: GridWorldEnv) -> np.ndarray:
     name = canonical_skill_name(skill_call.skill_name, skill_call.params)
     if name in {"go", "go_evading"}:
         target = _vec_param(skill_call.params["target"])
-        params[0] = target.x / scale
-        params[1] = target.y / scale
-        params[2] = 1.0 if name == "go_evading" else 0.0
-        params[3] = (target.x - int(env.player[0])) / scale
-        params[4] = (target.y - int(env.player[1])) / scale
+        dx = target.x - int(env.player[0])
+        dy = target.y - int(env.player[1])
+        distance = abs(dx) + abs(dy)
+        screen_width = max(1, int(getattr(env, "screen_width_tiles", env.size)))
+        screen_height = max(1, int(getattr(env, "screen_height_tiles", env.size)))
+        player_screen = (int(env.player[0]) // screen_width, int(env.player[1]) // screen_height)
+        target_screen = (target.x // screen_width, target.y // screen_height)
+        params[0] = dx / scale
+        params[1] = dy / scale
+        params[2] = distance / scale
+        params[3] = 1.0 if name == "go_evading" else 0.0
+        params[4] = 1.0 if target_screen != player_screen else 0.0
     elif name in {"attack", "collect"}:
         entity_id = str(skill_call.params["enemy_id"] if name == "attack" else skill_call.params["item_id"])
         entity = env.world_state().entities.get(entity_id)

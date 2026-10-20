@@ -106,6 +106,8 @@ Failures are logged in a form that a future agent can inspect to adjust curricul
 
 The first fully wired ladder is `go(target)`. The harness can generate deterministic curriculum worlds from `WorldSpec`, including empty rooms, border walls, and a single-wall detour terrain. Each held-out episode records the semantic state, target, trajectory, reward total, failure reason, blocked movement diagnostics, final distance, stuck detection, and timeout progress.
 
+For this ladder, `go` is treated as a local navigation instruction: the simulator still executes against an absolute target position, but the policy conditioning is driven by target delta, distance, and cross-screen flag rather than raw world coordinates. That keeps the skill definition local while still allowing adjacent-screen tasks.
+
 Run the `go` ladder:
 
 ```bash
@@ -147,6 +149,8 @@ competence/go.json
 ```
 
 When a level passes, the latest released checkpoint is copied into `competence/go_released.*` and a manifest is written to `competence/go_released.json`.
+
+Each run also writes `reports/go/run_YYYYMMDD_HHMMSS/summary.html`, a self-contained HTML view with per-level progress curves and validation state.
 
 The runner currently provides `HeuristicGoTrainer` and `RandomPolicyTrainer` implementations behind a small trainer interface. The heuristic trainer is a sanity check that proves the ladder plumbing works; PPO can replace it later without changing ladder configs, report formats, or competence frontier semantics.
 

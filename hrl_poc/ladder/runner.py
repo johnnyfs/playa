@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import shutil
 from dataclasses import replace
@@ -10,6 +11,7 @@ from typing import Any
 
 from hrl_poc.ladder.config import LadderConfig, LadderLevel, load_ladder_config
 from hrl_poc.ladder.trainers import LevelEvalResult, make_trainer
+from hrl_poc.ladder.world import validate_go_task
 
 
 def run_ladder(
@@ -48,7 +50,9 @@ def run_ladder(
 
     for level_idx, level in enumerate(levels):
         active_level = _with_max_eval_seeds(level, max_eval_seeds)
+        validation = _validate_level(active_level, seed_base + level_idx * 10_000)
         frontier["levels"][active_level.id]["status"] = "training"
+        frontier["levels"][active_level.id]["validation"] = validation["summary"]
         checkpoint = trainer.train_level(active_level, checkpoint_dir, initial_checkpoint=latest_passed_checkpoint)
         result = trainer.evaluate_level(
             checkpoint=checkpoint,
@@ -65,6 +69,7 @@ def run_ladder(
             "checkpoint": str(checkpoint.path),
             "initialization": checkpoint.metadata.get("initialization"),
             "train_metrics": checkpoint.metadata.get("train_metrics", {}).get("final"),
+            "validation": validation["summary"],
         }
         if result.passed:
             latest_passed_checkpoint = checkpoint
@@ -87,6 +92,7 @@ def run_ladder(
 
     _write_level_results(run_dir, level_results)
     _write_summary(run_dir, config, level_results)
+    _write_html_report(run_dir, config, level_results, frontier)
     _write_frontier(competence_dir, config.skill, frontier)
     return run_dir
 
@@ -129,6 +135,7 @@ def _initial_frontier(config: LadderConfig) -> dict[str, Any]:
                 "status": "untried",
                 "pass_rate": None,
                 "required_pass_rate": level.eval.pass_rate,
+                "validation": None,
             }
             for level in config.levels
         },
@@ -194,9 +201,273 @@ def _write_summary(run_dir: Path, config: LadderConfig, results: list[LevelEvalR
             "",
             "Failures are written under `failures/`; per-episode trajectories are under `trajectories/`.",
             "Released checkpoints are copied into `competence/` when a level passes.",
+            "Open `summary.html` for a visual view of training progress and frontier state.",
         ]
     )
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_html_report(run_dir: Path, config: LadderConfig, results: list[LevelEvalResult], frontier: dict[str, Any]) -> None:
+    rows = []
+    for result in results:
+        metadata = result.checkpoint.metadata
+        init = metadata.get("initialization") or {}
+        train_metrics = metadata.get("train_metrics") or {}
+        history = train_metrics.get("history", [])
+        validation = frontier["levels"][result.level_id].get("validation") or {}
+        rows.append(
+            {
+                "level_id": result.level_id,
+                "trainer": result.checkpoint.trainer,
+                "status": "passed" if result.passed else "failed",
+                "pass_rate": result.pass_rate,
+                "required_pass_rate": result.required_pass_rate,
+                "steps_done": int(metadata.get("steps_done", 0)),
+                "init_status": str(init.get("status", "n/a")),
+                "validation_possible": bool(validation.get("possible", False)),
+                "checkpoint": str(result.checkpoint.path),
+                "released": frontier.get("released_checkpoint"),
+                "history": history,
+                "final_metrics": train_metrics.get("final", {}),
+            }
+        )
+
+    released = frontier.get("released_checkpoint") or {}
+    latest_passed = frontier.get("latest_passed_level")
+    sections = []
+    for row in rows:
+        history = row["history"]
+        success_values = [float(item.get("success_rate", 0.0)) for item in history]
+        reward_values = [float(item.get("avg_reward", 0.0)) for item in history]
+        sections.append(
+            f"""
+            <section class="level">
+              <div class="level-head">
+                <div>
+                  <h2>{html.escape(row["level_id"])}</h2>
+                  <p>{html.escape(row["trainer"])} · {html.escape(row["status"])} · validation: {"ok" if row["validation_possible"] else "failed"}</p>
+                </div>
+                <div class="badge">{row["pass_rate"]:.3f} / {row["required_pass_rate"]:.3f}</div>
+              </div>
+              <div class="meta-grid">
+                <div><span>checkpoint</span><code>{html.escape(row["checkpoint"])}</code></div>
+                <div><span>steps</span><code>{row["steps_done"]}</code></div>
+                <div><span>init</span><code>{html.escape(row["init_status"])}</code></div>
+                <div><span>train success</span><code>{float(row["final_metrics"].get("success_rate", 0.0)):.3f}</code></div>
+              </div>
+              <div class="charts">
+                <div class="chart">
+                  <div class="chart-label">train success rate</div>
+                  {_sparkline_svg(success_values, "#2563eb")}
+                </div>
+                <div class="chart">
+                  <div class="chart-label">train reward</div>
+                  {_sparkline_svg(reward_values, "#16a34a")}
+                </div>
+              </div>
+            </section>
+            """
+        )
+
+    html_doc = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Competence Ladder - {html.escape(config.skill)}</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f7f7f5;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --line: #d1d5db;
+      --accent: #2563eb;
+      --good: #16a34a;
+      --bad: #dc2626;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }}
+    body {{
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #fafaf9 0%, #f3f4f6 100%);
+      color: var(--text);
+    }}
+    main {{
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 28px;
+    }}
+    .hero {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 20px 22px;
+      margin-bottom: 20px;
+    }}
+    h1, h2, h3, p {{ margin: 0; }}
+    .hero h1 {{ font-size: 28px; margin-bottom: 8px; }}
+    .hero p {{ color: var(--muted); line-height: 1.5; }}
+    .summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }}
+    .stat {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px 14px;
+      background: #fcfcfb;
+    }}
+    .stat span {{
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      margin-bottom: 6px;
+    }}
+    .stat strong {{
+      font-size: 16px;
+      font-weight: 650;
+    }}
+    .level {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px;
+      margin-top: 16px;
+      box-shadow: var(--shadow);
+    }}
+    .level-head {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }}
+    .level-head h2 {{ font-size: 20px; margin-bottom: 4px; }}
+    .level-head p {{ color: var(--muted); font-size: 14px; }}
+    .badge {{
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 8px 12px;
+      font-variant-numeric: tabular-nums;
+      background: #f9fafb;
+      white-space: nowrap;
+    }}
+    .meta-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }}
+    .meta-grid div {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #fcfcfb;
+      overflow: hidden;
+    }}
+    .meta-grid span {{
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }}
+    code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }}
+    .charts {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px;
+    }}
+    .chart {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+      background: #ffffff;
+    }}
+    .chart-label {{
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }}
+    .chart svg {{
+      width: 100%;
+      height: 72px;
+      display: block;
+    }}
+    .empty {{
+      color: var(--muted);
+      font-style: italic;
+    }}
+    .frontier {{
+      margin-top: 18px;
+      padding: 16px 18px;
+      border-radius: 12px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>Competence Ladder: {html.escape(config.skill)}</h1>
+      <p>Latest passed level: {html.escape(str(latest_passed or "none"))}. Released checkpoint: {html.escape(str(released.get("released_checkpoint", "none")) if released else "none")}.</p>
+      <div class="summary-grid">
+        <div class="stat"><span>levels run</span><strong>{len(results)}</strong></div>
+        <div class="stat"><span>latest passed</span><strong>{html.escape(str(latest_passed or "none"))}</strong></div>
+        <div class="stat"><span>released checkpoint</span><strong>{html.escape(str(released.get("released_checkpoint", "none")) if released else "none")}</strong></div>
+        <div class="stat"><span>skill</span><strong>{html.escape(config.skill)}</strong></div>
+      </div>
+    </section>
+    <section class="frontier">
+      <h2>Frontier</h2>
+      <p class="empty">The JSON frontier is also written to <code>competence/{html.escape(config.skill)}.json</code>.</p>
+    </section>
+    {''.join(sections) if sections else '<p class="empty">No levels were run.</p>'}
+  </main>
+</body>
+</html>
+"""
+    (run_dir / "summary.html").write_text(html_doc, encoding="utf-8")
+
+
+def _sparkline_svg(values: list[float], color: str) -> str:
+    width = 220
+    height = 64
+    padding = 6
+    if not values:
+        return f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="empty chart"><text x="10" y="34" fill="#9ca3af" font-size="12">no data</text></svg>'
+    minimum = min(values)
+    maximum = max(values)
+    span = maximum - minimum
+    if span == 0:
+        span = 1.0
+    points = []
+    for idx, value in enumerate(values):
+        x = padding + (width - 2 * padding) * (idx / max(1, len(values) - 1))
+        y = height - padding - ((value - minimum) / span) * (height - 2 * padding)
+        points.append(f"{x:.1f},{y:.1f}")
+    polyline = " ".join(points)
+    return (
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="training curve">'
+        f'<polyline fill="none" stroke="{color}" stroke-width="2.5" points="{polyline}" />'
+        f'<line x1="{padding}" y1="{height - padding}" x2="{width - padding}" y2="{height - padding}" stroke="#e5e7eb" stroke-width="1" />'
+        f"</svg>"
+    )
 
 
 def _write_frontier(competence_dir: str | Path, skill: str, frontier: dict[str, Any]) -> None:
@@ -238,6 +509,21 @@ def _mean(values: Any) -> float | None:
     if not nums:
         return None
     return sum(nums) / len(nums)
+
+
+def _validate_level(level: LadderLevel, seed_base: int, samples: int = 4) -> dict[str, Any]:
+    validations = [validate_go_task(level.world, level.task, seed_base + idx) for idx in range(samples)]
+    summary = {
+        "possible": all(validation.possible for validation in validations),
+        "samples": [validation.to_dict() for validation in validations],
+    }
+    if not summary["possible"]:
+        details = "; ".join(
+            f"seed={validation.seed} error={validation.error or 'none'} possible={validation.possible}"
+            for validation in validations
+        )
+        raise ValueError(f"Level {level.id} is not solvable as configured: {details}")
+    return {"summary": summary}
 
 
 if __name__ == "__main__":

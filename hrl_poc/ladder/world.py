@@ -161,6 +161,38 @@ class GeneratedWorld:
         return env
 
 
+@dataclass(frozen=True)
+class GoTaskValidation:
+    seed: int
+    possible: bool
+    world_walkable: bool
+    player_walkable: bool
+    target_walkable: bool
+    path_exists: bool
+    screen_transition_possible: bool
+    player_screen: tuple[int, int]
+    target_screen: tuple[int, int]
+    player: tuple[int, int] | None = None
+    target: tuple[int, int] | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seed": self.seed,
+            "possible": self.possible,
+            "world_walkable": self.world_walkable,
+            "player_walkable": self.player_walkable,
+            "target_walkable": self.target_walkable,
+            "path_exists": self.path_exists,
+            "screen_transition_possible": self.screen_transition_possible,
+            "player_screen": {"x": self.player_screen[0], "y": self.player_screen[1]},
+            "target_screen": {"x": self.target_screen[0], "y": self.target_screen[1]},
+            "player": None if self.player is None else {"x": self.player[0], "y": self.player[1]},
+            "target": None if self.target is None else {"x": self.target[0], "y": self.target[1]},
+            "error": self.error,
+        }
+
+
 def generate_world(spec: WorldSpec, seed: int, player: tuple[int, int] | None = None) -> GeneratedWorld:
     rng = np.random.default_rng(spec.seed + seed)
     walls = tuple(sorted(generate_walls(spec, rng)))
@@ -253,6 +285,47 @@ def generate_go_task(
             return world, Vec2(*target)
 
     raise ValueError(f"Could not generate valid go task for terrain={spec.terrain} seed={seed}")
+
+
+def validate_go_task(spec: WorldSpec, task: dict[str, Any], seed: int) -> GoTaskValidation:
+    try:
+        world, target = generate_go_task(spec, task, seed)
+        env = world.env()
+        player = tuple(int(v) for v in world.player)
+        target_pos = (int(target.x), int(target.y))
+        player_screen = (player[0] // spec.screen_width_tiles, player[1] // spec.screen_height_tiles)
+        target_screen = (target_pos[0] // spec.screen_width_tiles, target_pos[1] // spec.screen_height_tiles)
+        screen_transition_possible = True
+        screen_offset = task.get("target_screen_offset")
+        if screen_offset is not None:
+            offset_x, offset_y = _pair(screen_offset)
+            screen_transition_possible = env.screen_transition_possible(player_screen, (player_screen[0] + offset_x, player_screen[1] + offset_y))
+        return GoTaskValidation(
+            seed=seed,
+            possible=bool(player != target_pos and env.is_walkable(player) and env.is_walkable(target_pos) and env.path_exists(player, target_pos) and screen_transition_possible),
+            world_walkable=bool(env.is_walkable(player)),
+            player_walkable=bool(env.is_walkable(player)),
+            target_walkable=bool(env.is_walkable(target_pos)),
+            path_exists=bool(env.path_exists(player, target_pos)),
+            screen_transition_possible=bool(screen_transition_possible),
+            player_screen=player_screen,
+            target_screen=target_screen,
+            player=player,
+            target=target_pos,
+        )
+    except Exception as exc:
+        return GoTaskValidation(
+            seed=seed,
+            possible=False,
+            world_walkable=False,
+            player_walkable=False,
+            target_walkable=False,
+            path_exists=False,
+            screen_transition_possible=False,
+            player_screen=(0, 0),
+            target_screen=(0, 0),
+            error=str(exc),
+        )
 
 
 def walkable_cells(spec: WorldSpec, walls: tuple[tuple[int, int], ...] | set[tuple[int, int]]) -> list[tuple[int, int]]:

@@ -193,7 +193,8 @@ def go_oracle_actions(obs_batch: list[dict[str, object]]) -> tuple[torch.Tensor,
         state = obs["state"]
         player = np.asarray(state["player"], dtype=np.int64)
         params = np.asarray(obs["skill_params"], dtype=np.float32)
-        goal = np.rint(params[:2] * (state["terrain"].shape[0] - 1)).astype(np.int64)
+        delta = np.rint(params[:2] * (state["terrain"].shape[0] - 1)).astype(np.int64)
+        goal = player + delta
         action = shortest_path_action(np.asarray(state["terrain"]), tuple(player), tuple(goal))
         targets.append(action)
         mask.append(True)
